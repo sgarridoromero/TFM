@@ -1,0 +1,338 @@
+---
+title: "CÃ³digo TFM"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Carga de datos
+
+Se cargan los datos desde la web para obtener los datos fenotipicos:
+
+```{r}
+library(GEOquery)
+gset <- getGEO("GSE5460", GSEMatrix =TRUE, getGPL=FALSE)
+if (length(gset) > 1) idx <- grep("GPL570", attr(gset, "names")) else idx <- 1
+gset <- gset[[idx]]
+ex <- exprs(gset)
+```
+El conjunto de datos cuenta con varios datos fenotipicos que no son del interés de este trabajo, por lo que se crea una tabla con los datos que nos interesan relativos a los tumores:
+```{r message=FALSE}
+BR_grade<-gset$`B-R grade:ch1`
+ER<-gset$`ER:ch1`
+HER2<-gset$`HER2:ch1`
+LVI<-gset$`LVI:ch1`
+node_status<-gset$`node status:ch1`
+tumor_size<-gset$`tumor size:ch1`
+tumor_type<-gset$`tumor type:ch1`
+fenot <- data.frame(BR_grade,ER,HER2,LVI,node_status,tumor_size,tumor_type)
+rownames(fenot) = colnames(ex)
+
+```
+
+Se cargan de otra manera distinta para poder obtener la matriz de expresión con el formato adecuado ya que mediante el método anterior resulta complicado utilizar algunas de las funciones que se necesitan más adelante:
+```{r}
+library(GEOquery)
+gcel=getGEOSuppFiles("GSE5460")
+##Cambio directorio
+setwd("GSE5460/")
+##Descomprimir archivos
+system(" tar xvf GSE5460_RAW.tar")
+##Carga paquete affy
+library(affy)
+##Lectura de datos
+GSE5460  = ReadAffy()
+##Guardado de datos
+dir=getwd()
+save(GSE5460,file=paste(dir,"GSE5460.rda",sep=""))
+```
+
+## Método MAS5
+
+Se aplica el método MAS5 para realizar la correción de fondo y el cálculo del valor de expresión. De esta manera se pasan los datos a nivel de sonda a los datos de expresión de cada gen.
+```{r message=FALSE}
+GSE5460_mas5 = affy::mas5(GSE5460)
+pData(GSE5460_mas5)<-fenot
+save(GSE5460_mas5,file=paste(dir,"GSE5460_mas5.rda",sep=""))
+```
+
+## Filtrado de genes
+
+La dimensión de la matriz de expresión es muy grande por lo que se procede a realizar un filtrado de los genes con la función nsFilter. Se filtra utilizando el rango intercuartilico y la desviación típica. Así, se eliminan los genes con menos relevancia en el conjunto de datos.
+
+```{r message=FALSE}
+library('genefilter')
+GSE5460.filt1 = nsFilter(GSE5460_mas5,var.func=IQR,var.cutoff=0.5,require.GOBP=TRUE)
+GSE5460.filt2 = nsFilter(GSE5460_mas5,var.func=sd,var.cutoff=0.5,require.GOBP=TRUE)
+sel = intersect(featureNames(GSE5460.filt1),featureNames(GSE5460.filt2))
+GSE5460_mas5_filt = GSE5460_mas5[sel,]
+GSE5460_mas5_filt<-GSE5460_mas5_filt[,-127]
+save(GSE5460_mas5_filt,file=paste(dir,"GSE5460_mas5_filt.rda",sep=""))
+```
+Inicialmente se contaba con un total de 54675 genes. Después del filtrado se ha reducido a 6218 genes.
+
+
+## Análisis de componentes principales
+
+Se realiza un análisis de componentes principales de los genes para reducir la dimensión. Se centran y se tipifican los datos. 
+```{r message=FALSE}
+pca = prcomp(t(exprs(GSE5460_mas5_filt)),scale=TRUE,center=TRUE)
+summary(pca)
+```
+Se obtienen 129 componentes principales de las cuales las 7 primeras explican 90% de la variación total. 
+
+A continuación, se realiza la representación gráfica de las dos primeras componentes separando los datos por colores en función del valor de la variable elegida ("node_status", "ER", "HER2").
+
+```{r message=FALSE}
+pacman::p_load(ggfortify)
+df0 = t(exprs(GSE5460_mas5_filt))
+node_status = pData(GSE5460_mas5_filt)[,"node_status"]
+df = data.frame(node_status,df0)
+png(paste0(dir,"PCA46_node_status.png"))
+my_plot<-autoplot(pca,data=df,colour="node_status")
+plot(my_plot)
+```
+
+En la imagen se puede ver que las componenetes no son capaces de diferenciar los datos en función del valor que toma la variable "node_status".
+
+```{r message=FALSE}
+df0 = t(exprs(GSE5460_mas5_filt))
+ER = pData(GSE5460_mas5_filt)[,"ER"]
+df = data.frame(ER,df0)
+png(paste0(dir,"PCA46_ER.png"))
+my_plot<-autoplot(pca,data=df,colour="ER")
+plot(my_plot)
+```
+La variable "ER" divide perfectamente las muestras en dos grupos diferenciados en función de si la variable es positiva o negativa.
+
+```{r message=FALSE}
+df0 = t(exprs(GSE5460_mas5_filt))
+HER2 = pData(GSE5460_mas5_filt)[,"HER2"]
+df = data.frame(HER2,df0)
+png(paste0(dir,"PCA46_HER2.png"))
+my_plot<-autoplot(pca,data=df,colour="HER2")
+plot(my_plot)
+pca$x<-pca$x[-127,]
+pca$x<-pca$x[,-127]
+
+```
+En este caso, los datos aparecen divididos en tres grupos. Por un lado hay dos grupos que cuentan con la variable "HER2" negativa y un grupo central con la variable "HER2" positiva.
+
+## Mapa de calor
+
+Se realiza un mapa de calor para comprobar la correlacción entre los distintos genes.
+
+```{r message=FALSE}
+library(pheatmap)
+corMatrix <- cor(exprs(GSE5460_mas5_filt),use="c")
+pheatmap(corMatrix)
+```
+En el mapa obtenido se puede ver una correlacción grande entre los genes.
+
+## Test de Fisher
+
+Se dividen los genes en grupos significativos según la información accesible en Gene Ontology para aplicar un test de Fisher. Se empieza por estudiar el estado de los nodos en cada una de las muestras:
+```{r message=FALSE}
+y=pData(GSE5460_mas5_filt)[,"node_status"] 
+```
+Se determinan los grupos de genes significativos:
+```{r message=FALSE}
+pacman::p_load(genefilter,multtest)
+tt = rowttests(GSE5460_mas5_filt,y)
+p0 = tt$p.value
+p1 = mt.rawp2adjp(p0, "BH")
+orden.original = order(p1$index)
+p.BH = p1$adjp[orden.original,2]
+significativos = which(p.BH < 0.05)
+```
+Se construye el universo de genes comprobando que no hay duplicidades:
+```{r message=FALSE}
+G1.entreizd = unlist(mget(featureNames(GSE5460_mas5_filt), hgu133plus2ENTREZID))
+anyDuplicated(G1.entreizd)
+```
+Se cambia la identificación para que coincida con la identificación de la base de datos de los genes identificativos:
+```{r message=FALSE}
+seleccionados = unlist(mget(featureNames(GSE5460_mas5_filt[significativos,]),hgu133plus2ENTREZID))
+```
+A continuación, se aplica el Test de Fisher:
+```{r message=FALSE}
+pacman::p_load(GO.db,Category,GOstats)
+params = new("GOHyperGParams", geneIds = seleccionados,universeGeneIds = G1.entreizd,annotation = annotation(GSE5460_mas5_filt), ontology = "BP",pvalueCutoff = 0.001,conditional = FALSE,testDirection = "over")
+overRepresented = hyperGTest(params)
+htmlReport(overRepresented, file = "GSE5460_nodestatus_overRepresented.html")
+head(summary(overRepresented))
+```
+Se crea un grafo donde los vértices son los grupos creados por Gene Ontology.
+```{r eval=FALSE}
+library(Rgraphviz)
+png(file=paste(dir,"node_status_overRepresented.png",sep=""))
+plot(goDag(overRepresented))
+dev.off()
+```
+Además, también se van a estudiar las variables "HER2" y "ER". La segunda determina si existen receptores de estrógenos o no. Y la primera determina si existe el receptor del factor de crecimiento epidérmico humano 2 que promueve el crecimiento de las células cancerosas.
+
+Se empieza por la variable "HER2".
+```{r message=FALSE}
+y=pData(GSE5460_mas5_filt)[,"HER2"] 
+```
+Se determinan los grupos de genes significativos:
+```{r message=FALSE}
+tt = rowttests(GSE5460_mas5_filt,y)
+p0 = tt$p.value
+p1 = mt.rawp2adjp(p0, "BH")
+orden.original = order(p1$index)
+p.BH = p1$adjp[orden.original,2]
+significativos = which(p.BH < 0.05)
+```
+Se construye el universo de genes comprobando que no hay duplicidades:
+```{r message=FALSE}
+G1.entreizd = unlist(mget(featureNames(GSE5460_mas5_filt), hgu133plus2ENTREZID))
+anyDuplicated(G1.entreizd)
+```
+Se cambia la identificación para que coincida con la identificación de la base de datos de los genes identificativos:
+```{r message=FALSE}
+seleccionados = unlist(mget(featureNames(GSE5460_mas5_filt[significativos,]),hgu133plus2ENTREZID))
+```
+A continuación, se aplica el Test de Fisher:
+```{r message=FALSE}
+params = new("GOHyperGParams", geneIds = seleccionados,universeGeneIds = G1.entreizd,annotation = annotation(GSE5460_mas5_filt), ontology = "BP",pvalueCutoff = 0.001,conditional = FALSE,testDirection = "over")
+overRepresented = hyperGTest(params)
+htmlReport(overRepresented, file = "GSE5460_HER2_overRepresented.html")
+head(summary(overRepresented))
+```
+Se representa el grafo y se guarda la imagen.
+```{r eval=FALSE}
+png(file=paste(dir,"HER2_overRepresented.png",sep=""))
+plot(goDag(overRepresented))
+dev.off()
+```
+
+Por último, se realiza el procedimiento para la variable "ER".
+```{r message=FALSE}
+y=pData(GSE5460_mas5_filt)[,"ER"] 
+```
+Se determinan los grupos de genes significativos:
+```{r message=FALSE}
+tt = rowttests(GSE5460_mas5_filt,y)
+p0 = tt$p.value
+p1 = mt.rawp2adjp(p0, "BH")
+orden.original = order(p1$index)
+p.BH = p1$adjp[orden.original,2]
+significativos = which(p.BH < 0.05)
+```
+Se construye el universo de genes comprobando que no hay duplicidades:
+```{r message=FALSE}
+G1.entreizd = unlist(mget(featureNames(GSE5460_mas5_filt), hgu133plus2ENTREZID))
+anyDuplicated(G1.entreizd)
+```
+Se cambia la identificación para que coincida con la identificación de la base de datos de los genes identificativos:
+```{r message=FALSE}
+seleccionados = unlist(mget(featureNames(GSE5460_mas5_filt[significativos,]),hgu133plus2ENTREZID))
+```
+A continuación, se aplica el Test de Fisher:
+```{r message=FALSE}
+params = new("GOHyperGParams", geneIds = seleccionados,universeGeneIds = G1.entreizd,annotation = annotation(GSE5460_mas5_filt), ontology = "BP",pvalueCutoff = 0.001,conditional = FALSE,testDirection = "over")
+overRepresented = hyperGTest(params)
+htmlReport(overRepresented, file = "GSE5460_ER_overRepresented.html")
+head(summary(overRepresented))
+```
+Al igual que en los casos anteriores, se crea el grafo y se guarda la imagen obtenida.
+```{r eval=FALSE}
+png(file=paste(dir,"ER.png",sep=""))
+plot(goDag(overRepresented))
+dev.off()
+```
+En los archivos html creados se encuentra la información de los grupos de genes significativos para determinar el valor de cada variable fenotipica.
+
+## Análisis de conjuntos de genes (GSA)
+
+El siguiente análisis que se va a realizar es sobre conjuntos de genes para determinar cuáles tienen asociación positiva con la variable y determinar si el resultado es similar al obtenido en el análisis anterior. 
+
+Primero, se dividen los datos de los genes en conjuntos mediante los grupos establecidos en Gene Ontology utilizando la anotación en la que se encuentran los genes. 
+```{r message=FALSE}
+library(annotate)
+annotation(GSE5460_mas5)
+library(hgu133plus2.db)
+library(GSEABase)
+gse5460.gsc = GeneSetCollection(GSE5460_mas5_filt,setType=GOCollection())
+names(gse5460.gsc) = unlist(lapply(gse5460.gsc,setName))
+gsc = gse5460.gsc
+```
+Se seleccionan los grupos que tienen más de 50 elementos y se ignoran el resto para el análisis.
+```{r message=FALSE}
+gruposGrandes = gsc[which(sapply(geneIds(gsc),length) > 50)]
+gse = GSE5460_mas5_filt
+```
+Al igual que con el análisis anterior, se realiza el procedimiento con las variables "node_status", "HER2" y "ER".
+```{r message=FALSE}
+node.num = as.numeric(pData(gse)[,"node_status"])
+pacman::p_load(GSA)
+gse5460.gsa = GSA(exprs(gse),node.num, genenames=featureNames(gse),genesets=geneIds(gsc),resp.type="Two class unpaired", nperms=1000)
+GSA.plot(gse5460.gsa)
+```
+Genes con asociación negativa:
+```{r message=FALSE}
+(ind.lo = which(gse5460.gsa$pvalues.lo <.05))
+head(names(gsc[ind.lo]))
+```
+Genes con asociación positiva:
+```{r message=FALSE}
+(ind.hi = which(gse5460.gsa$pvalues.hi <.05))
+head(names(gsc[ind.hi]))
+```
+Los identificadores de los grupos de genes se guardan en archivos separados para su posterior análisis:
+```{r message=FALSE}
+neg=names(gsc[ind.lo])
+pos=names(gsc[ind.hi])
+write.csv(neg, file = "neg_node_status.csv")
+write.csv(pos, file = "pos_node_status.csv")
+```
+Se repite el proceso para la variable "HER2":
+```{r message=FALSE}
+node.num = as.numeric(pData(gse)[,"HER2"])
+pacman::p_load(GSA)
+gse5460.gsa = GSA(exprs(gse),node.num, genenames=featureNames(gse),genesets=geneIds(gsc),resp.type="Two class unpaired", nperms=1000)
+```
+Genes con asociación negativa:
+```{r message=FALSE}
+(ind.lo = which(gse5460.gsa$pvalues.lo <.05))
+head(names(gsc[ind.lo]))
+```
+Genes con asociación positiva:
+```{r message=FALSE}
+(ind.hi = which(gse5460.gsa$pvalues.hi <.05))
+head(names(gsc[ind.hi]))
+```
+Los identificadores de los grupos de genes se guardan en archivos separados para su posterior análisis:
+```{r message=FALSE}
+neg=names(gsc[ind.lo])
+pos=names(gsc[ind.hi])
+write.csv(neg, file = "neg_HER2.csv")
+write.csv(pos, file = "pos_HER2.csv")
+```
+Se vuelve a repetir el proceso para la variable "ER":
+```{r message=FALSE}
+node.num = as.numeric(pData(gse)[,"ER"])
+pacman::p_load(GSA)
+gse5460.gsa = GSA(exprs(gse),node.num, genenames=featureNames(gse),genesets=geneIds(gsc),resp.type="Two class unpaired", nperms=1000)
+```
+Genes con asociación negativa:
+```{r message=FALSE}
+(ind.lo = which(gse5460.gsa$pvalues.lo <.05))
+head(names(gsc[ind.lo]))
+```
+Genes con asociación positiva:
+```{r message=FALSE}
+(ind.hi = which(gse5460.gsa$pvalues.hi <.05))
+head(names(gsc[ind.hi]))
+```
+Los identificadores de los grupos de genes se guardan en archivos separados para su posterior análisis:
+```{r message=FALSE}
+neg=names(gsc[ind.lo])
+pos=names(gsc[ind.hi])
+write.csv(neg, file = "neg_ER.csv")
+write.csv(pos, file = "pos_ER.csv")
